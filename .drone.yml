@@ -1,0 +1,88 @@
+kind: pipeline # 定义对象类型
+type: docker # 定义流水线类型
+name: drone-demo # 定义流水线名称
+
+steps: # 定义流水线执行步骤，这些步骤将顺序执行
+  - name: maven-package # 打包
+    pull: if-not-exists
+    image: harbor.domain.com/customize/maven
+    network_mode: host
+    volumes:
+      - name: maven-cache
+        path: /root/.m2
+      - name: maven-build
+        path: /app/build # 将应用打包好的Jar和执行脚本挂载出来
+    commands:
+      - p='/app/build/drone-demo' && mkdir -p $p && rm -r $p && mkdir -p $p # 创建清理文件夹
+      - mvn -s '/usr/share/maven/ref/settings.xml' clean package # maven打包
+      - rm target/*sources.jar && cp target/*.jar . # 清除多余包
+      # 使用脚本生成dockerfile文件
+      - chmod +x generate_dockerfile.sh && sh generate_dockerfile.sh `ls *.jar`
+      # 设置harbor镜像发布版本 打包出来是这种格式 drone-demo-*-x.x.x.jar 从文件名截取版本号
+      - echo -n `ls *.jar | awk -F drone-demo- '{print $2}' | awk -F .jar '{print $1}'`,latest > .tags
+      # 拷贝到主机挂载目录 这一步是保存原始文件 不需要可以不处理
+      - cp *.jar docker-compose.yml Dockerfile /app/build/drone-demo
+
+  - name: build-images-and-push # 发布到harbor镜像仓库
+    pull: if-not-exists
+    image: plugins/docker
+    network_mode: host
+    settings:
+      registry: harbor.domain.com
+      repo: harbor.domain.com/customize/drone-demo
+      cache: true
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      insecure: true
+
+  - name: scp files # 拷贝执行部署到目标主机
+    pull: if-not-exists
+    network_mode: host
+    image: appleboy/drone-scp
+    settings:
+      host: dev.domain.com
+      port: 22
+      username: root
+      password:
+        from_secret: dev_password # 从Secret中读取SSH密码
+      target: /data/service/drone-demo/
+      source: docker-compose.yml
+
+  - name: build-start # 链接目标主机 启动服务
+    pull: if-not-exists
+    network_mode: host
+    image: appleboy/drone-ssh # SSH工具镜像
+    settings:
+      host: dev.domain.com # 远程连接地址
+      port: 22 # 远程连接端口
+      username: root # 远程连接账号
+      password:
+        from_secret: dev_password # 从Secret中读取SSH密码
+      command_timeout: 5m # 远程执行命令超时时间
+      envs:
+        - DOCKER_USERNAME
+        - DOCKER_PASSWORD
+      script: # 执行命令 根据实际需求来
+        - cd /data/service/drone-demo
+        - export SERVICE_IMAGE=harbor.domain.com/customize/drone-demo
+        - docker login harbor.domain.com -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
+        - docker-compose down && docker-compose pull && docker-compose up -d
+    environment:
+      DOCKER_USERNAME:
+        from_secret: docker_username
+      DOCKER_PASSWORD:
+        from_secret: docker_password
+
+volumes: # 定义流水线挂载目录，用于共享数据
+  - name: maven-build
+    host:
+      path: /data/maven/build # 从宿主机中挂载的目录
+  - name: maven-cache
+    host:
+      path: /data/maven/cache
+
+trigger:
+  event: # 提交触发
+    - push

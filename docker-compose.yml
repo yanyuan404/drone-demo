@@ -1,0 +1,7 @@
+version: '3'
+services:
+  drone-demo:
+    image: ${SERVICE_IMAGE:-yanyuan404/drone-demo}
+    container_name: drone-demo
+    ports:
+      - 8080:8080
